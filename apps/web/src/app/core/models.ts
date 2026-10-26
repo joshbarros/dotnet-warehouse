@@ -14,6 +14,7 @@ export type OrderStatus = 'Requested' | 'Held' | 'Dispatched' | 'Cancelled' | 'R
 export interface Order {
   id: string;
   skuCode: string;
+  ownerId: string;
   reference: string;
   units: number;
   feeCents: number;
@@ -30,4 +31,16 @@ export interface LogEntry {
   type: string;
   module: string;
   occurredAt: string;
+}
+
+export interface UserInfo {
+  id: string;
+  email: string;
+  roles: string[];
+}
+
+export interface SessionResponse {
+  accessToken: string;
+  expiresAt: string;
+  user: UserInfo;
 }

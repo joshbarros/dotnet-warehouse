@@ -12,17 +12,23 @@ say() { printf '  %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 jget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)"; }
 
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@warehouse.local}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-WarehouseAdmin2026}"
+CUSTOMER_PASSWORD="Smoke-Passw0rd1"
+code_of() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+token_of() { python3 -c "import sys,json; print(json.load(sys.stdin)['accessToken'])"; }
+
 open_sku() { # code receivedUnits -> prints nothing
-  curl -sf -X POST "$API/api/skus" -H "$JSON" \
+  curl -sf -X POST "$API/api/skus" -H "$JSON" -H "$ADM" \
     -d "{\"code\":\"$1\",\"name\":\"Smoke Widget\",\"category\":\"Hardware\",\"bin\":\"Bin A-01\",\"receivedUnits\":$2}" >/dev/null \
     || fail "could not open sku $1"
 }
 book() { # code reference units -> prints order id
-  curl -sf -X POST "$API/api/orders" -H "$JSON" \
+  curl -sf -X POST "$API/api/orders" -H "$JSON" -H "$CUS" \
     -d "{\"skuCode\":\"$1\",\"reference\":\"$2\",\"units\":$3}" | jget "['id']"
 }
-order_field() { curl -sf "$API/api/orders/$1" | jget "['$2']"; }
-remaining() { curl -sf "$API/api/skus/$1" | jget "['onHandUnits']"; }
+order_field() { curl -sf -H "$ADM" "$API/api/orders/$1" | jget "['$2']"; }
+remaining() { curl -sf -H "$ADM" "$API/api/skus/$1" | jget "['onHandUnits']"; }
 
 wait_for() { # description command... : polls up to 30s until the command succeeds
   local what="$1"; shift
@@ -35,11 +41,25 @@ wait_for() { # description command... : polls up to 30s until the command succee
 status_is() { [ "$(order_field "$1" status)" = "$2" ]; }
 remaining_is() { [ "$(remaining "$1")" = "$2" ]; }
 terminal() { case "$(order_field "$1" status)" in Dispatched|Rejected|Cancelled) return 0 ;; *) return 1 ;; esac; }
-event_types() { curl -sf "$API/api/orders/$1/events" | python3 -c "import sys,json; print(' '.join(e['type'] for e in json.load(sys.stdin)))"; }
+event_types() { curl -sf -H "$ADM" "$API/api/orders/$1/events" | python3 -c "import sys,json; print(' '.join(e['type'] for e in json.load(sys.stdin)))"; }
 dlq_is() { [ "$(dlq_count)" = "$1" ]; }
 dlq_count() { curl -sf -u platform:platform "$RABBIT/api/queues/%2F/dispatch.work.dlq" | jget "['messages']"; }
 
 curl -sf "$API/api/health" >/dev/null || fail "API is not healthy at $API; run: docker compose up --build --wait"
+
+echo "0. authentication and ownership"
+[ "$(code_of "$API/api/skus")" = 401 ] || fail "an anonymous request should be 401"
+[ "$(code_of -X POST "$API/api/auth/login" -H "$JSON" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"wrong-Passw0rd\"}")" = 401 ] || fail "a wrong password should be 401"
+ADM="Authorization: Bearer $(curl -sf -X POST "$API/api/auth/login" -H "$JSON" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" | token_of)" || fail "the administrator could not sign in"
+CUS="Authorization: Bearer $(curl -sf -X POST "$API/api/auth/register" -H "$JSON" -d "{\"email\":\"smoke-$RUN@example.com\",\"password\":\"$CUSTOMER_PASSWORD\"}" | token_of)" || fail "could not register a customer"
+OTHER="Authorization: Bearer $(curl -sf -X POST "$API/api/auth/register" -H "$JSON" -d "{\"email\":\"other-$RUN@example.com\",\"password\":\"$CUSTOMER_PASSWORD\"}" | token_of)"
+[ "$(code_of -X POST "$API/api/skus" -H "$JSON" -H "$CUS" -d '{"code":"X"}')" = 403 ] || fail "a customer must not open skus"
+open_sku "A-$RUN" 5
+IDA="$(book "A-$RUN" "ORD-$RUN-OWN" 1)"
+[ "$(code_of -H "$OTHER" "$API/api/orders/$IDA")" = 404 ] || fail "another customer must get 404 for someone else's order"
+[ "$(code_of -H "$CUS" "$API/api/orders/$IDA/events")" = 403 ] || fail "the event log is staff only"
+[ "$(code_of -X POST -H "$OTHER" "$API/api/orders/$IDA/cancellation")" = 404 ] || fail "another customer must not cancel it"
+say "401 anonymous, 401 bad password, 403 customer opening a sku, 404 for another customer, 403 on the event log"
 
 echo "1. input is validated at the door"
 open_sku "V-$RUN" 10
@@ -49,7 +69,7 @@ for body in \
   "{\"skuCode\":\"V-$RUN\",\"reference\":\"R-$RUN\",\"units\":51}" \
   "{\"skuCode\":\"V-$RUN\",\"reference\":\"R-$RUN\",\"units\":4294967297}" \
   "{\"skuCode\":\"V-$RUN\",\"reference\":\"R-$RUN\",\"units\":9223372036854775807}"; do
-  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/orders" -H "$JSON" -d "$body")"
+  code="$(code_of -X POST "$API/api/orders" -H "$JSON" -H "$CUS" -d "$body")"
   [ "$code" = 400 ] || fail "expected 400 for $body, got $code"
 done
 say "empty, zero, over-limit and overflowing unit counts are all 400"
@@ -59,7 +79,7 @@ open_sku "H-$RUN" 10
 ID="$(book "H-$RUN" "ORD-$RUN-1" 3)"
 wait_for "order to be Dispatched" status_is "$ID" Dispatched
 [ "$(order_field "$ID" feeCents)" = 850 ] || fail "fee should be 400 + 3 x 150 cents"
-[ "$(curl -sf "$API/api/slips/$ID" | jget "['status']")" = Issued ] || fail "pick slip not issued"
+[ "$(curl -sf -H "$ADM" "$API/api/slips/$ID" | jget "['status']")" = Issued ] || fail "pick slip not issued"
 wait_for "remaining units to be 7" remaining_is "H-$RUN" 7
 TYPES="$(event_types "$ID")"
 for t in stock.reserve stock.held slip.issued; do
@@ -95,7 +115,7 @@ IDP="$(book "P-$RUN" "ORD-POISON-$RUN" 2)"
 wait_for "poison order to be Rejected" status_is "$IDP" Rejected
 wait_for "units to be restored to 5" remaining_is "P-$RUN" 5
 wait_for "dispatch.work.dlq to gain one message" dlq_is $((BEFORE + 1))
-[ "$(curl -sf "$API/api/slips/$IDP" | jget "['status']")" = Rejected ] || fail "rejection should be committed on the slip row"
+[ "$(curl -sf -H "$ADM" "$API/api/slips/$IDP" | jget "['status']")" = Rejected ] || fail "rejection should be committed on the slip row"
 [ "$(order_field "$IDP" unitsReleasedAt)" != None ] || fail "order should record the release"
 say "rejected, dead-lettered (+1 in dispatch.work.dlq), remaining back to 5"
 
@@ -105,21 +125,21 @@ WON=0
 for attempt in 1 2 3; do
   IDR="$(book "R-$RUN" "ORD-$RUN-R$attempt" 2)"
   # The pick slip exists before the order is marked Dispatched (the final mark is delayed in compose).
-  wait_for "pick slip to exist" curl -sf "$API/api/slips/$IDR"
+  wait_for "pick slip to exist" curl -sf -H "$ADM" "$API/api/slips/$IDR"
   if status_is "$IDR" Held; then WON=1; break; fi
   say "window missed on attempt $attempt (order already Dispatched); the cancellation still has to hold; retrying"
-  curl -sf -X POST "$API/api/orders/$IDR/cancellation" >/dev/null || true
+  curl -sf -X POST -H "$CUS" "$API/api/orders/$IDR/cancellation" >/dev/null || true
   wait_for "order to be Cancelled" status_is "$IDR" Cancelled
 done
 [ "$WON" = 1 ] || fail "never caught the order between slip issued and final mark"
-curl -sf -X POST "$API/api/orders/$IDR/cancellation" >/dev/null || fail "cancellation was refused"
+curl -sf -X POST -H "$CUS" "$API/api/orders/$IDR/cancellation" >/dev/null || fail "cancellation was refused"
 wait_for "order to be Cancelled" status_is "$IDR" Cancelled
 sleep 3 # longer than the final-mark delay: the late mark must not undo the cancellation
 status_is "$IDR" Cancelled || fail "the final mark overwrote the cancellation"
-[ "$(curl -sf "$API/api/slips/$IDR" | jget "['status']")" = Issued ] || fail "the issued slip was rolled back"
+[ "$(curl -sf -H "$ADM" "$API/api/slips/$IDR" | jget "['status']")" = Issued ] || fail "the issued slip was rolled back"
 [ "$(order_field "$IDR" slipNumber)" = None ] || fail "the late final mark should have been skipped"
 wait_for "units to come back" remaining_is "R-$RUN" 6
-code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/orders/$IDR/cancellation")"
+code="$(code_of -X POST -H "$CUS" "$API/api/orders/$IDR/cancellation")"
 [ "$code" = 409 ] || fail "second cancellation should be 409, got $code"
 say "order Cancelled, slip still Issued, remaining 6, second cancellation 409"
 
