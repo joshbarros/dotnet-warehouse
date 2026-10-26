@@ -37,7 +37,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 [CollectionDefinition("api")]
 public class ApiCollection : ICollectionFixture<ApiFactory>;
 
-public sealed record Session(string AccessToken, string RefreshCookie, Guid UserId, string Email, string[] Roles);
+public sealed record SignedIn(string AccessToken, string RefreshCookie, Guid UserId, string Email, string[] Roles);
 
 public static class ApiHelpers
 {
@@ -54,7 +54,7 @@ public static class ApiHelpers
     public static string NewEmail() => $"user-{Guid.NewGuid():N}@test.local";
     public static string NewCode() => $"S{Guid.NewGuid():N}"[..14];
 
-    public static async Task<Session> RegisterAsync(this ApiFactory factory, string? email = null)
+    public static async Task<SignedIn> RegisterAsync(this ApiFactory factory, string? email = null)
     {
         email ??= NewEmail();
         var response = await factory.NewClient().PostAsJsonAsync("/api/auth/register", new { email, password = Password });
@@ -62,20 +62,20 @@ public static class ApiHelpers
         return await ReadSessionAsync(response);
     }
 
-    public static async Task<Session> LoginAsync(this ApiFactory factory, string email, string password)
+    public static async Task<SignedIn> LoginAsync(this ApiFactory factory, string email, string password)
     {
         var response = await factory.NewClient().PostAsJsonAsync("/api/auth/login", new { email, password });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return await ReadSessionAsync(response);
     }
 
-    public static Task<Session> AdminAsync(this ApiFactory factory) => factory.LoginAsync(ApiFactory.AdminEmail, ApiFactory.AdminPassword);
+    public static Task<SignedIn> AdminAsync(this ApiFactory factory) => factory.LoginAsync(ApiFactory.AdminEmail, ApiFactory.AdminPassword);
 
-    public static async Task<Session> ReadSessionAsync(HttpResponseMessage response)
+    public static async Task<SignedIn> ReadSessionAsync(HttpResponseMessage response)
     {
         var json = (await response.Content.ReadFromJsonAsync<JsonElement>());
         var user = json.GetProperty("user");
-        return new Session(
+        return new SignedIn(
             json.GetProperty("accessToken").GetString()!,
             RefreshCookieFrom(response),
             user.GetProperty("id").GetGuid(),
@@ -98,7 +98,7 @@ public static class ApiHelpers
         return request;
     }
 
-    public static async Task<string> CreateSkuAsync(this ApiFactory factory, Session admin, int receivedUnits = 10)
+    public static async Task<string> CreateSkuAsync(this ApiFactory factory, SignedIn admin, int receivedUnits = 10)
     {
         var code = NewCode();
         var response = await factory.ClientFor(admin.AccessToken).PostAsJsonAsync("/api/skus",
@@ -107,7 +107,7 @@ public static class ApiHelpers
         return code;
     }
 
-    public static async Task<Guid> BookAsync(this ApiFactory factory, Session who, string skuCode, string? reference = null, int units = 1)
+    public static async Task<Guid> BookAsync(this ApiFactory factory, SignedIn who, string skuCode, string? reference = null, int units = 1)
     {
         var response = await factory.ClientFor(who.AccessToken).PostAsJsonAsync("/api/orders",
             new { skuCode, reference = reference ?? $"ORD-{Guid.NewGuid():N}"[..12], units });

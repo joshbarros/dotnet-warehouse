@@ -9,7 +9,7 @@ namespace Warehouse.Identity;
 
 public record CredentialsRequest(string? Email, string? Password);
 
-public record SessionResponse(string AccessToken, DateTimeOffset ExpiresAt, UserInfo User);
+public record TokenResponse(string AccessToken, DateTimeOffset ExpiresAt, UserInfo User);
 
 [ApiController]
 [Route("api/auth")]
@@ -22,7 +22,7 @@ public class AuthController(AuthService auth, IOptions<JwtOptions> options) : Co
 
     [AllowAnonymous]
     [HttpPost("register")]
-    public async Task<ActionResult<SessionResponse>> Register(CredentialsRequest request, CancellationToken ct)
+    public async Task<ActionResult<TokenResponse>> Register(CredentialsRequest request, CancellationToken ct)
     {
         var result = await auth.RegisterAsync(request.Email, request.Password, ct);
         SetCookie(result);
@@ -31,7 +31,7 @@ public class AuthController(AuthService auth, IOptions<JwtOptions> options) : Co
 
     [AllowAnonymous]
     [HttpPost("login")]
-    public async Task<ActionResult<SessionResponse>> Login(CredentialsRequest request, CancellationToken ct)
+    public async Task<ActionResult<TokenResponse>> Login(CredentialsRequest request, CancellationToken ct)
     {
         var result = await auth.LoginAsync(request.Email, request.Password, ct);
         SetCookie(result);
@@ -41,7 +41,7 @@ public class AuthController(AuthService auth, IOptions<JwtOptions> options) : Co
     /// <summary>The refresh token travels in an HttpOnly cookie. A custom header is required so another site cannot make the browser call this.</summary>
     [AllowAnonymous]
     [HttpPost("refresh")]
-    public async Task<ActionResult<SessionResponse>> Refresh(CancellationToken ct)
+    public async Task<ActionResult<TokenResponse>> Refresh(CancellationToken ct)
     {
         RequireSameCategoryHeader();
         var result = await auth.RefreshAsync(Request.Cookies[RefreshCookie], ct);
@@ -85,5 +85,5 @@ public class AuthController(AuthService auth, IOptions<JwtOptions> options) : Co
         IsEssential = true,
     };
 
-    private static SessionResponse ToResponse(AuthResult r) => new(r.Access.Value, r.Access.ExpiresAt, r.User);
+    private static TokenResponse ToResponse(AuthResult r) => new(r.Access.Value, r.Access.ExpiresAt, r.User);
 }

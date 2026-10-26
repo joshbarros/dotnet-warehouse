@@ -1,7 +1,7 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { Observable, firstValueFrom } from 'rxjs';
-import { SessionResponse, UserInfo } from './models';
+import { AuthResponse, UserInfo } from './models';
 
 /** Sent on refresh and logout so a page on another site cannot make the browser call them. */
 export const REQUESTED_WITH = { 'X-Requested-With': 'warehouse-web' };
@@ -25,17 +25,17 @@ export class AuthService {
 
   token = () => this.state()?.token ?? null;
 
-  /** Called once at startup: resumes the session when the refresh cookie is still good. */
+  /** Called once at startup: resumes the signed-in state when the refresh cookie is still good. */
   async restore(): Promise<void> {
     await this.refresh();
     this.ready.set(true);
   }
 
   login = (email: string, password: string) =>
-    this.enter(this.http.post<SessionResponse>('/api/auth/login', { email, password }));
+    this.enter(this.http.post<AuthResponse>('/api/auth/login', { email, password }));
 
   register = (email: string, password: string) =>
-    this.enter(this.http.post<SessionResponse>('/api/auth/register', { email, password }));
+    this.enter(this.http.post<AuthResponse>('/api/auth/register', { email, password }));
 
   /** Concurrent callers share one request: refresh tokens are single-use, so a second call would look like a replay. */
   refresh(): Promise<boolean> {
@@ -53,10 +53,10 @@ export class AuthService {
 
   private async doRefresh(): Promise<boolean> {
     try {
-      const session = await firstValueFrom(
-        this.http.post<SessionResponse>('/api/auth/refresh', {}, { headers: REQUESTED_WITH }),
+      const auth = await firstValueFrom(
+        this.http.post<AuthResponse>('/api/auth/refresh', {}, { headers: REQUESTED_WITH }),
       );
-      this.state.set({ token: session.accessToken, user: session.user });
+      this.state.set({ token: auth.accessToken, user: auth.user });
       return true;
     } catch {
       this.state.set(null);
@@ -64,8 +64,8 @@ export class AuthService {
     }
   }
 
-  private async enter(request: Observable<SessionResponse>): Promise<void> {
-    const session = await firstValueFrom(request);
-    this.state.set({ token: session.accessToken, user: session.user });
+  private async enter(request: Observable<AuthResponse>): Promise<void> {
+    const auth = await firstValueFrom(request);
+    this.state.set({ token: auth.accessToken, user: auth.user });
   }
 }

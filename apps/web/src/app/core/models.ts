@@ -39,7 +39,7 @@ export interface UserInfo {
   roles: string[];
 }
 
-export interface SessionResponse {
+export interface AuthResponse {
   accessToken: string;
   expiresAt: string;
   user: UserInfo;
