@@ -76,26 +76,28 @@ export class AppComponent implements OnInit {
 
   async openSku(): Promise<void> {
     await this.run(async () => {
+      const code = this.code();
       const sku = await this.api.openSku({
-        code: this.code(),
+        code,
         name: this.name(),
         category: this.category(),
         bin: this.bin(),
         receivedUnits: Number(this.capacity()),
       });
-      this.code.set('');
+      if (this.code() === code) this.code.set('');
       this.selectedCode.set(sku.code);
     });
   }
 
   async book(): Promise<void> {
     await this.run(async () => {
+      const reference = this.reference();
       await this.api.book({
         skuCode: this.selectedCode(),
-        reference: this.reference(),
+        reference,
         units: Number(this.units()),
       });
-      this.reference.set('');
+      if (this.reference() === reference) this.reference.set('');
     });
   }
 

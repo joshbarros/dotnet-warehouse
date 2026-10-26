@@ -115,11 +115,23 @@ curl -s -X POST http://127.0.0.1:5213/api/orders/<id>/cancellation \
 
 An order is validated at the door: reference required (at most 40 characters), 1 to 50 units. The shipping fee is 400 cents plus 150 cents per unit. The poison match is a case-sensitive substring: `ORD-POISON-7` and any longer token containing `POISON` match.
 
+## Develop with Nx
+
+The repository is an Nx workspace (`nx.json`, plugin `@nx/dotnet`). `npx nx show projects` lists `api` (the ASP.NET Core monolith), `web` (the Angular app) and the inferred xUnit project.
+
+```bash
+docker compose up -d --wait db kafka rabbitmq   # the brokers and Postgres, not the app
+npx nx serve api                                # http://localhost:5213
+npx nx serve web                                # http://localhost:4293, proxies /api to the API
+WEB_URL=http://localhost:4293 npx playwright test   # the same browser specs, against the dev servers
+npx nx build web && npx nx build api            # what CI builds
+```
+
 ## What is tested, and where it runs
 
 - **xUnit against real Postgres** (`tests/api`, 25 tests): two tasks with two `DbContext`s fight for one remaining unit (one `Held`, one `Short`, on-hand 0, no hold for the loser); empty input, over-limit input, integer overflow (4294967297 must not wrap to 1), the fee, the poison substring; the same message delivered twice is claimed once; a release returns the units once; the poison rejection is committed before the dead-letter; a cancellation followed by the late final mark leaves the order `Cancelled` and the pick slip `Issued`. The race test was run against a read-then-write version of the hold, where it failed, and against the conditional update, where it passes.
 - **`scripts/smoke.sh`** drives the composed stack with a run id on every code, so a kept volume does not collide: validation, the happy path (fee, pick slip, Kafka log), three concurrent orders for one unit (one dispatched, two short, no hold for the losers), the poison reference (rejected, `dispatch.work.dlq` gains one message, units restored), and a cancellation that lands between the pick slip and the final mark (order `Cancelled`, slip `Issued`, units back, second cancellation `409`). To make that last window wide enough to hit on purpose, Compose sets `Orders__FinalMarkDelayMs=1500`; it is a latency knob and defaults to 0.
-- **Playwright** (`e2e/specs/place-order.spec.ts`): adds a SKU in the UI, places an order, sees `Dispatched` and the pick slip number, reloads to prove the page reads the API and keeps nothing in `localStorage`, then cancels and sees the units come back. It runs against the composed web port, on a developer machine.
+- **Playwright** (`e2e/specs/place-order.spec.ts`): adds a SKU in the UI, places an order, sees `Dispatched` and the pick slip number, reloads to prove the page reads the API and keeps nothing in `localStorage`, then cancels and sees the units come back. It runs against the composed web port, on a developer machine. A second spec, `e2e/specs/ui-flows.spec.ts`, drives the page through the refusal messages (over-limit, empty reference, duplicate), the poison rejection, the loser of a race for the last of the scarce number, and the Kafka event log panel. Both specs pass against the Compose stack and against the Nx dev servers.
 - **CI** (`.github/workflows/ci.yml`, on push): `npm ci`, Prettier check, `dotnet format whitespace --verify-no-changes`, `dotnet test` with a Postgres 17 service, and `nx build` for web and api. CI does not run the compose smoke or the Playwright spec.
 
 ## API
