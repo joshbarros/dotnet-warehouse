@@ -63,7 +63,7 @@ public class OrderService(OrdersDbContext db, ISkuCatalog skus, ICurrentUser use
         return order;
     }
 
-    public async Task<List<Order>> ListAsync(string? skuCode, CancellationToken ct)
+    public async Task<(List<Order> Items, int Total)> ListAsync(string? skuCode, int page, int pageSize, CancellationToken ct)
     {
         var query = db.Orders.AsNoTracking();
         if (!user.IsStaff)
@@ -73,7 +73,9 @@ public class OrderService(OrdersDbContext db, ISkuCatalog skus, ICurrentUser use
         }
         if (!string.IsNullOrWhiteSpace(skuCode))
             query = query.Where(b => b.SkuCode == skuCode);
-        return await query.OrderByDescending(b => b.CreatedAt).Take(100).ToListAsync(ct);
+        var total = await query.CountAsync(ct);
+        var items = await query.OrderByDescending(b => b.CreatedAt).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        return (items, total);
     }
 
     /// <summary>Moves Held or Dispatched to Cancelled and asks Inventory to give the units back. The pick slip is not touched.</summary>
