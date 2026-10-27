@@ -72,14 +72,14 @@ RabbitMQ topology is declared in code (`libs/shared/Messaging/Topology.cs`): exc
 
 ## Architecture
 
-One deployable (`apps/api`), several libraries. Each business module is its own class library with its own `DbContext`, its own Postgres **schema** (`identity`, `orders`, `stock`, `dispatch`), its own migrations and its own outbox and inbox tables. No module references another; the only shared code is `Warehouse.Shared`, and the one cross-module read (a sku's existence and pricing inputs) goes through an interface, `ISkuCatalog`, that Inventory implements and Orders consumes.
+One deployable (`apps/api`), several libraries. Each business module is its own class library with its own `DbContext`, its own Postgres **schema** (`identity`, `orders`, `stock`, `dispatch`), its own migrations and its own outbox and inbox tables. No module references another; the only shared code is `Warehouse.Shared`, and the one cross-module read (a SKU's existence and pricing inputs) goes through an interface, `ISkuCatalog`, that Inventory implements and Orders consumes.
 
 ```mermaid
 flowchart TB
     api["apps/api: composition root, middleware, endpoints"]
     api --> identity & orders & stock & dispatch
     identity["libs/identity: users, roles, JWT, refresh tokens"]
-    orders["libs/orders: scheman orders"]
+    orders["libs/orders: schema orders"]
     stock["libs/inventory: schema stock"]
     dispatch["libs/dispatch: schema dispatch"]
     identity & orders & stock & dispatch --> shared["libs/shared: messaging, outbox/inbox, auth primitives, middleware"]
@@ -92,7 +92,7 @@ Modules still talk only through messages: RabbitMQ carries the commands, Kafka k
 
 | Piece | How it works |
 | --- | --- |
-| Accounts | ASP.NET Core Identity. Passwords need 40+ characters with upper case, lower case and a digit, and 4 distinct characters. Five wrong passwords lock the account for 15 minutes (`429`). A wrong password and an unknown email give the same `401`. |
+| Accounts | ASP.NET Core Identity. Passwords need 10+ characters with upper case, lower case and a digit, and 4 distinct characters. Five wrong passwords lock the account for 15 minutes (`429`). A wrong password and an unknown email give the same `401`. |
 | Access token | JWT (HS256), 15 minutes, held **in memory** by the Angular app and sent as `Authorization: Bearer`. The signing key must be at least 32 bytes; the API refuses to start without one. |
 | Refresh token | 256 random bits in an `HttpOnly`, `SameSite=Strict`, `Path=/api/auth` cookie (`Secure` over HTTPS). Only its SHA-256 is stored. Every refresh **rotates** it with a conditional `UPDATE`, so two concurrent refreshes with the same token cannot both win. Presenting a token that was already used revokes the whole family. Refresh and logout also need an `X-Requested-With: warehouse-web` header, so another site cannot trigger them. |
 | Roles | `Customer` (default at registration), `Staff`, `Admin`. An administrator is seeded from configuration on first start. |
@@ -101,7 +101,7 @@ Modules still talk only through messages: RabbitMQ carries the commands, Kafka k
 
 ## Run it
 
-Needs Node 22 (npm 40), .NET SDK 40.0.401 (`global.json`), Docker (arm64 is fine) and python3 for the smoke script.
+Needs Node 22 (npm 10), .NET SDK 10.0.401 (`global.json`), Docker (arm64 is fine) and python3 for the smoke script.
 
 ```bash
 npm ci
@@ -121,8 +121,8 @@ docker compose down                   # keeps the Postgres volume; `down -v` dro
 | Web (nginx, proxies `/api/`) | 8093 |
 | API (`/scalar/v1`, `/api/health`) | 5213 |
 | Postgres 17 | 5473 |
-| Kafka 12.8.1 (KRaft, one broker) | 9123 |
-| RabbitMQ 12.13 / management UI (`platform` / `platform`) | 5703 / 15703 |
+| Kafka 3.8.1 (KRaft, one broker) | 9123 |
+| RabbitMQ 3.13 / management UI (`platform` / `platform`) | 5703 / 15703 |
 
 Inside the Compose network the API and nginx listen on 8080 and Kafka's internal listener is 9092.
 
@@ -135,26 +135,29 @@ API=http://127.0.0.1:5213
 login() { curl -s -X POST $API/api/auth/login -H 'content-type: application/json' -d "{\"email\":\"$1\",\"password\":\"$2\"}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])'; }
 ADMIN="Authorization: Bearer $(login admin@warehouse.local WarehouseAdmin2026)"
 
-curl -s -X POST $API/api/skus -H "$ADMIN" -H 'content-type: application/json' \
-  -d '{"code":"HARDWARE-RTM-1","name":"Blue Widget","category":"Hardware","bin":"A-01","receivedUnits":40}'
-
 curl -s -X POST $API/api/auth/register -H 'content-type: application/json' \
   -d '{"email":"ana@example.com","password":"Passw0rd-Demo1"}'      # 201; its accessToken goes in $ANA below
 ANA="Authorization: Bearer <accessToken>"
 
-curl -s -X POST $API/api/orders -H "$ANA" -H 'content-type: application/json' \
-  -d '{"skuCode":"HARDWARE-RTM-1","reference":"ORD-1001","units":12}'
-# 202, status Requested. Use the returned id:
+curl -s -H "$ADMIN" -X POST $API/api/skus \
+  -H 'content-type: application/json' \
+  -d '{"code":"WIDGET-BLUE-1","name":"Blue Widget","category":"Hardware","bin":"Bin A-01","receivedUnits":40}'
 
-curl -s -H "$ANA" $API/api/orders/<id>             # Dispatched after a few seconds, with a pick slip number
+curl -s -H "$ANA" -X POST $API/api/orders \
+  -H 'content-type: application/json' \
+  -d '{"skuCode":"WIDGET-BLUE-1","reference":"ORD-1001","units":12}'
+# 202, status Requested, feeCents 2200. Use the returned id:
+
+curl -s -H "$ANA" $API/api/orders/<id>               # Dispatched after a few seconds, with a pick slip number
 curl -s -H "$ANA" $API/api/slips/<id>
-curl -s -H "$ANA" $API/api/skus/HARDWARE-RTM-1     # onHandUnits 28
-curl -s -H "$ADMIN" $API/api/orders/<id>/events    # the Kafka log; staff only (a customer gets 403)
+curl -s -H "$ANA" $API/api/skus/WIDGET-BLUE-1        # onHandUnits 28
+curl -s -H "$ADMIN" $API/api/orders/<id>/events        # the Kafka log for this order
 
-curl -s -X POST -H "$ANA" $API/api/orders/<id>/cancellation   # units come back; the pick slip stays
+curl -s -H "$ANA" -X POST $API/api/orders/<id>/cancellation \
+  -H 'content-type: application/json'                       # units come back; the pick slip stays
 ```
 
-An order is validated at the door: reference required (at most 40 characters), units from 1 to 50 units. The fee is 400 cents plus 150 cents per unit. The poison match is a case-sensitive substring: `ORD-POISON-7` and any longer token containing `POISON` match.
+An order is validated at the door: reference required (at most 40 characters), 1 to 50 units. The shipping fee is 400 cents plus 150 cents per unit. The poison match is a case-sensitive substring: `ORD-POISON-7` and any longer token containing `POISON` match.
 
 ## Develop with Nx
 
@@ -163,7 +166,7 @@ The repository is an Nx workspace (`nx.json`, plugin `@nx/dotnet`). `npx nx show
 ```bash
 docker compose up -d --wait db kafka rabbitmq   # the brokers and Postgres, not the app
 npx nx serve api                                # http://localhost:5213 (Development: seeded admin, public docs)
-npx nx serve web                                # http://localhost:4293, proxies /api to the API
+npx nx serve web                                # http://localhost:4290, proxies /api to the API
 WEB_URL=http://localhost:4293 npx playwright test   # the same browser specs, against the dev servers
 npx nx run-many -t typecheck lint -p web        # tsc --noEmit and ESLint (angular-eslint)
 npx nx build web && npx nx build api            # what CI builds
@@ -171,10 +174,10 @@ npx nx build web && npx nx build api            # what CI builds
 
 ## What is tested, and where it runs
 
-- **Unit tests** (`tests/Warehouse.UnitTests`, 110 tests, no Docker, about 12 seconds): the order rules and fee, the poison rule including integer overflow, token creation and validation, password and lockout behaviour of the auth service on an in-memory store, owner-or-staff access, the retry policy and topology, message serialization, the outbox `DbContext` conventions, and the HTTP middleware (problem details are `application/problem+json`, security headers, correlation ids).
-- **Integration tests** (`tests/Warehouse.IntegrationTests`, 48 tests, real Postgres): the stock race (two tasks, two `DbContext`s, one unit: one `Held`, one `Short`, no hold for the loser) and the check constraint behind it; the saga handlers against the real schema (duplicate delivery claimed once, a release returns the unit once, the poison rejection committed before the dead-letter, cancellation then late final mark); and the **whole HTTP pipeline** through `WebApplicationFactory`: register, login, wrong password, lockout, expired and tampered tokens, refresh rotation, replay revoking the family, two concurrent refreshes (exactly one wins), logout, the same-category header, the auth rate limit, and 401/403/404 for every route and ownership case. The race test was run against a read-then-write version of the reservation, where it failed, and against the conditional update, where it passes.
+- **Unit tests** (`tests/Warehouse.UnitTests`, 110 tests, no Docker, about 3 seconds): the order rules and fee, the poison rule including integer overflow, token creation and validation, password and lockout behaviour of the auth service on an in-memory store, owner-or-staff access, the retry policy and topology, message serialization, the outbox `DbContext` conventions, and the HTTP middleware (problem details are `application/problem+json`, security headers, correlation ids).
+- **Integration tests** (`tests/Warehouse.IntegrationTests`, 48 tests, real Postgres): the stock race (two tasks, two `DbContext`s, one unit: one `Held`, one `Short`, no hold for the loser) and the check constraint behind it; the saga handlers against the real schema (duplicate delivery claimed once, a release returns the units once, the poison rejection committed before the dead-letter, cancellation then late final mark); and the **whole HTTP pipeline** through `WebApplicationFactory`: register, login, wrong password, lockout, expired and tampered tokens, refresh rotation, replay revoking the family, two concurrent refreshes (exactly one wins), logout, the same-category header, the auth rate limit, and 401/403/404 for every route and ownership case. The race test was run against a read-then-write version of the hold, where it failed, and against the conditional update, where it passes.
 - **`scripts/smoke.sh`** drives the composed stack: authentication and ownership first (401, 403, 404), then validation, the happy path (fee, pick slip, Kafka log), the last unit with three concurrent orders, the poison reference (rejected, `dispatch.work.dlq` gains one message, units restored), and a cancellation that lands between the pick slip and the final mark. To make that last window wide enough to hit on purpose, Compose sets `Orders__FinalMarkDelayMs=1500`; it is a latency knob and defaults to 0.
-- **Playwright** (`e2e/specs`, 11 tests, Chromium): `auth.spec.ts` (anonymous sees only the form, wrong password, password policy, a customer books and sees only their own orders with no staff controls, sign-out, the session surviving a reload through the cookie while `document.cookie` stays empty); `book-space.spec.ts` (open a sku, book, pick slip, reload, cancel); `ui-flows.spec.ts` (refusal messages, the poison rejection, the loser of a race, the Kafka event log). They run against the composed web port and against the Nx dev servers.
+- **Playwright** (`e2e/specs`, 11 tests, Chromium): `auth.spec.ts` (anonymous sees only the form, wrong password, password policy, a customer books and sees only their own orders with no staff controls, sign-out, the session surviving a reload through the cookie while `document.cookie` stays empty); `place-order.spec.ts` (open a SKU, book, pick slip, reload, cancel); `ui-flows.spec.ts` (refusal messages, the poison rejection, the loser of a race, the Kafka event log). They run against the composed web port and against the Nx dev servers.
 - **CI** (`.github/workflows/ci.yml`) has two jobs. `verify`: `npm ci`, Prettier check, `dotnet format whitespace --verify-no-changes`, unit tests, integration tests (Postgres 17 service) with coverage uploaded, a NuGet vulnerability check, `npm audit`, `nx typecheck` and `nx lint` for web (zero warnings allowed) and `nx build`. `e2e`: builds the Compose stack, runs the smoke and every Playwright spec, and uploads traces and prints logs on failure. Dependabot watches NuGet, npm, Actions and Docker.
 
 ## Cloud mapping
@@ -199,10 +202,10 @@ JSON over HTTP. Everything except health and `/api/auth/register|login|refresh|l
 | `POST /api/auth/login` | Signs in; sets the refresh cookie. | `200`, `401`, `429` locked or rate limited |
 | `POST /api/auth/refresh`, `POST /api/auth/logout` | Rotate or revoke the refresh cookie. Need `X-Requested-With: warehouse-web`. | `200`/`204`, `400` header missing, `401` |
 | `GET /api/auth/me` | The caller. | `200`, `401` |
-| `POST /api/skus` | Opens a sku with the units received. Staff. | `201`, `400` invalid, `403`, `409` code exists |
+| `POST /api/skus` | Adds a SKU with the units received. Staff. | `201`, `400` invalid, `403`, `409` code exists |
 | `GET /api/skus`, `GET /api/skus/{code}` | Skus with the live on-hand units. | `200`, `404` |
-| `POST /api/orders` | Accepts an order (1 to 50 units) for the caller and starts the saga. | `202` Requested, `400` invalid, `404` unknown sku, `409` duplicate reference |
-| `GET /api/orders?skuCode=` | The caller's latest 100 orders (staff: everyone's), optionally for one sku. | `200` |
+| `POST /api/orders` | Accepts an order (1 to 50 units) for the caller and starts the saga. | `202` Requested, `400` invalid, `404` unknown SKU, `409` duplicate reference |
+| `GET /api/orders?skuCode=` | The caller's latest 100 orders (staff: everyone's), optionally for one SKU. | `200` |
 | `GET /api/orders/{id}` | One order and its status. Owner or staff. | `200`, `404` |
 | `POST /api/orders/{id}/cancellation` | Moves a held or dispatched order to `Cancelled` and gives the units back. The pick slip is not touched. Owner or staff. | `202`, `404`, `409` wrong status |
 | `GET /api/orders/{id}/events` | The Kafka event log for one order. Staff. | `200`, `403` |
@@ -222,7 +225,7 @@ Compose sets these on the API container. Defaults in `apps/api/appsettings.json`
 | `Jwt__Key` | `${JWT_KEY}` or a demo key | HS256 signing key, at least 32 bytes. Required; startup fails without it. |
 | `Jwt__AccessMinutes` / `__RefreshDays` / `__SecureCookies` | `15` / `14` / `false` | Token lifetimes; set `SecureCookies` when TLS ends in front of the API. |
 | `Identity__SeedAdmin__Email` / `__Password` | `${ADMIN_EMAIL}` / `${ADMIN_PASSWORD}` | Administrator created on first start. |
-| `RateLimit__AuthPerMinute` | `120` (code default `50 units`) | Requests a minute per client to `/api/auth/*`. |
+| `RateLimit__AuthPerMinute` | `120` (code default `20`) | Requests a minute per client to `/api/auth/*`. |
 | `ForwardedHeaders__Enabled` | `true` | Trust `X-Forwarded-*` from the reverse proxy (nginx here). Leave off when the API is reached directly. |
 | `Docs__Public` | `true` | Serve Scalar and OpenAPI without a token. |
 | `Logging__Json` | `true` | Structured JSON console logs. |
@@ -234,7 +237,7 @@ Compose sets these on the API container. Defaults in `apps/api/appsettings.json`
 ```bash
 docker compose ps                      # five services, all healthy
 docker compose logs -f api             # relay, consumers, poison and retry lines
-docker compose exec db psql -U warehouse -d warehouse -c 'select "RoutingKey","SentAt" from "OutboxMessages" order by "Id" desc limit 40'
+docker compose exec db psql -U warehouse -d warehouse -c 'select "RoutingKey","SentAt" from "OutboxMessages" order by "Id" desc limit 10'
 open http://127.0.0.1:15703        # RabbitMQ management, platform / platform
 ```
 
@@ -264,7 +267,7 @@ apps/api       thin host: composition root, middleware, endpoints
 apps/web       Angular 21, styled with Tailwind 4 utilities only (sign-in, role-aware workspace)
 libs/shared    messaging (outbox, inbox, relay, consumers), auth primitives, middleware
 libs/identity  users, roles, JWT, refresh tokens          (schema identity)
-libs/orders  order rules and the saga's first step    (scheman orders)
+libs/orders  order rules and the saga's first step    (schema orders)
 libs/inventory  the only writer of the on-hand units     (schema stock)
 libs/dispatch pick slips                            (schema dispatch)
 tests/         Warehouse.UnitTests, Warehouse.IntegrationTests
