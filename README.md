@@ -1,5 +1,19 @@
 # dotnet-warehouse
 
+## Start here: engineering evidence
+
+A public reference application for order and inventory workflows, not a customer deployment or client case study. The useful question is how it handles conflicting requests and repeated messages.
+
+- **Two buyers request the last unit:** inspect [concurrency tests](tests/Warehouse.IntegrationTests/InventoryConcurrencyTests.cs) and the assertions for one successful hold and one rejected reservation.
+- **A message is delivered again:** the same test file covers duplicate delivery and repeated stock release; [outbox batch tests](tests/Warehouse.IntegrationTests/OutboxBatchTests.cs) cover relay behavior.
+- **A reviewer needs to reproduce the result:** use the setup and test sections below, and inspect [CI runs](https://github.com/joshbarros/dotnet-warehouse/actions/workflows/ci.yml) for the tested revision, database integration checks and browser tests.
+
+Tests cover defined scenarios; they do not establish a universal no-overselling guarantee or production readiness for another business. The architecture, operational assumptions and local-only credentials are documented below.
+
+[Work with Josué on backend features and integrations](https://josuebarros.com/services)
+
+---
+
 Stock by SKU and the orders that draw it down. The scarce number is the **on-hand units** of a SKU, and the **Inventory** module is its only writer: it holds units with a single conditional `UPDATE` that matches only while the on-hand units still cover the order, so when two orders fight for the last unit, one commits a hold and the other is short and writes none. An order reference that contains the poison token `POISON` is committed as rejected by the Dispatch module, the message is dead-lettered, and a compensating command gives the units back. A later cancellation also gives the units back, but it does not roll back the pick slip that was already issued.
 
 One ASP.NET Core process, one Postgres database. An HTTP write saves the order and an outbox row in one local transaction; a `BackgroundService` relay publishes outbox rows to RabbitMQ (the work queue) and Kafka (the event log); the next module consumes from RabbitMQ, claims an inbox key in the same transaction as its own write, and writes its own row and outbox row. Saga steps never call each other in-process. Delivery is at-least-once: the relay can publish and crash before it marks a row sent, so the row goes out again, and every consumer dedupes with its inbox key. Each saga step only moves an order forward from the status it expects.
